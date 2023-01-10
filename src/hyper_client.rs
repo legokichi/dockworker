@@ -1,13 +1,10 @@
-use crate::errors::*;
+use crate::errors::Error as DwError;
 use crate::http_client::HttpClient;
-use futures::prelude::*;
-use futures::stream::FusedStream;
-use http::{HeaderMap, Request, StatusCode};
+use http::{HeaderMap, Request, Response};
 use hyper::Uri;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-use std::result;
 use std::str::FromStr;
 
 #[derive(Clone, Debug)]
@@ -31,102 +28,6 @@ impl Client {
     }
 }
 
-#[derive(Debug)]
-pub struct Response {
-    pub status: StatusCode,
-    buf: Vec<u8>,
-    rx: futures::channel::mpsc::UnboundedReceiver<hyper::body::Bytes>,
-    #[allow(dead_code)]
-    handle: std::thread::JoinHandle<()>,
-}
-
-impl Response {
-    pub fn new(mut res: http::Response<hyper::Body>) -> Response {
-        let status = res.status();
-        let (tx, rx) = futures::channel::mpsc::unbounded();
-
-        let handle = std::thread::spawn(move || {
-            let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-
-            let future = res.body_mut().try_for_each(move |chunk| {
-                if !tx.is_closed() {
-                    tx.unbounded_send(chunk).unwrap();
-                }
-                futures::future::ok(())
-            });
-
-            tokio_runtime.block_on(future).unwrap();
-        });
-
-        Response {
-            status,
-            buf: Vec::new(),
-            rx,
-            handle,
-        }
-    }
-}
-
-impl std::io::Read for Response {
-    fn read(&mut self, buf: &mut [u8]) -> std::result::Result<usize, std::io::Error> {
-        let n = buf.len();
-        let m = std::cmp::min(self.buf.len(), n);
-        let mut i = 0;
-
-        for byte in self.buf.drain(..m) {
-            buf[i] = byte;
-            i += 1;
-        }
-
-        if n == m {
-            return Ok(i);
-        }
-
-        let mut j = i;
-        let mut buffer = Vec::new();
-
-        if !self.rx.is_terminated() {
-            let stream = self.rx.by_ref().skip_while(|bytes| {
-                let m = std::cmp::min(bytes.len(), n - j);
-                let len = bytes.len();
-                j += len;
-
-                for byte in &bytes[..m] {
-                    buf[i] = *byte;
-                    i += 1;
-                }
-
-                if len < m {
-                    return futures::future::ready(true);
-                }
-
-                if len == m {
-                    return futures::future::ready(false);
-                }
-
-                for byte in &bytes[m..] {
-                    buffer.push(*byte);
-                }
-
-                futures::future::ready(false)
-            });
-
-            let (_, _) = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(stream.into_future());
-        }
-
-        self.buf = buffer;
-
-        Ok(i)
-    }
-}
-
 /// Http client using hyper
 #[derive(Debug)]
 pub struct HyperClient {
@@ -134,12 +35,11 @@ pub struct HyperClient {
     client: Client,
     /// base connection address
     base: Uri,
-    tokio_runtime: std::sync::Mutex<tokio::runtime::Runtime>,
 }
 
-fn join_uri(uri: &Uri, path: &str) -> Result<Uri> {
+fn join_uri(uri: &Uri, path: &str) -> Result<Uri, DwError> {
     let joined = format!("{uri}{path}");
-    Uri::from_str(&joined).map_err(|err| Error::InvalidUri {
+    Uri::from_str(&joined).map_err(|err| DwError::InvalidUri {
         var: joined,
         source: err,
     })
@@ -163,7 +63,7 @@ async fn request_with_redirect<T: Into<hyper::Body> + Sync + Send + 'static + Cl
     uri: Uri,
     headers: HeaderMap,
     body: Option<T>,
-) -> Result<hyper::Response<hyper::Body>> {
+) -> Result<http::Response<hyper::Body>, DwError> {
     let request =
         request_builder(&method, &uri, &headers).body(if let Some(body) = body.clone() {
             body.into()
@@ -217,18 +117,15 @@ async fn request_with_redirect<T: Into<hyper::Body> + Sync + Send + 'static + Cl
     }
 }
 
+async fn fetch_body(resp: http::Response<hyper::Body>) -> Result<http::Response<Vec<u8>>, DwError> {
+    let (p, b) = resp.into_parts();
+    let b = hyper::body::to_bytes(b).await?.to_vec();
+    Ok(Response::from_parts(p, b))
+}
+
 impl HyperClient {
     fn new(client: Client, base: Uri) -> Self {
-        Self {
-            client,
-            base,
-            tokio_runtime: std::sync::Mutex::new(
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap(),
-            ),
-        }
+        Self { client, base }
     }
 
     /// path to unix socket
@@ -250,7 +147,7 @@ impl HyperClient {
         key: &Path,
         cert: &Path,
         ca: &Path,
-    ) -> result::Result<Self, Error> {
+    ) -> Result<Self, DwError> {
         let mut key_buf = Vec::new();
         let mut cert_buf = Vec::new();
         let mut ca_buf = Vec::new();
@@ -275,7 +172,7 @@ impl HyperClient {
         builder.add_root_certificate(ca);
         // This ensures that using docker-machine-esque addresses work with Hyper.
         let addr_https = addr.clone().replacen("tcp://", "https://", 1);
-        let url = Uri::from_str(&addr_https).map_err(|err| Error::InvalidUri {
+        let url = Uri::from_str(&addr_https).map_err(|err| DwError::InvalidUri {
             var: addr_https,
             source: err,
         })?;
@@ -286,10 +183,10 @@ impl HyperClient {
         Ok(Self::new(Client::HttpsClient(client), url))
     }
 
-    pub fn connect_with_http(addr: &str) -> result::Result<Self, Error> {
+    pub fn connect_with_http(addr: &str) -> Result<Self, DwError> {
         // This ensures that using docker-machine-esque addresses work with Hyper.
         let addr_https = addr.to_string().replace("tcp://", "http://");
-        let url = Uri::from_str(&addr_https).map_err(|err| Error::InvalidUri {
+        let url = Uri::from_str(&addr_https).map_err(|err| DwError::InvalidUri {
             var: addr_https,
             source: err,
         })?;
@@ -297,137 +194,160 @@ impl HyperClient {
     }
 }
 
+#[async_trait::async_trait]
 impl HttpClient for HyperClient {
-    type Err = Error;
+    type Err = DwError;
 
-    fn get(&self, headers: &HeaderMap, path: &str) -> result::Result<Response, Self::Err> {
+    async fn get(&self, headers: &HeaderMap, path: &str) -> Result<Response<Vec<u8>>, Self::Err> {
         let url = join_uri(&self.base, path)?;
 
-        let res = self
-            .tokio_runtime
-            .lock()
-            .unwrap()
-            .block_on(request_with_redirect::<Vec<u8>>(
-                self.client.clone(),
-                http::Method::GET,
-                url,
-                headers.clone(),
-                None,
-            ))?;
+        let res = request_with_redirect::<Vec<u8>>(
+            self.client.clone(),
+            http::Method::GET,
+            url,
+            headers.clone(),
+            None,
+        )
+        .await?;
+        let res = fetch_body(res).await?;
+        Ok(res)
+    }
+    async fn get_stream(
+        &self,
+        headers: &HeaderMap,
+        path: &str,
+    ) -> Result<Response<hyper::Body>, Self::Err> {
+        let url = join_uri(&self.base, path)?;
 
-        Ok(Response::new(res))
+        let res = request_with_redirect::<Vec<u8>>(
+            self.client.clone(),
+            http::Method::GET,
+            url,
+            headers.clone(),
+            None,
+        )
+        .await?;
+        Ok(res)
     }
 
-    fn head(&self, headers: &HeaderMap, path: &str) -> result::Result<HeaderMap, Self::Err> {
+    async fn head(&self, headers: &HeaderMap, path: &str) -> Result<HeaderMap, Self::Err> {
         let url = join_uri(&self.base, path)?;
 
-        let res = self
-            .tokio_runtime
-            .lock()
-            .unwrap()
-            .block_on(request_with_redirect::<Vec<u8>>(
-                self.client.clone(),
-                http::Method::HEAD,
-                url,
-                headers.clone(),
-                None,
-            ))?;
+        let res = request_with_redirect::<Vec<u8>>(
+            self.client.clone(),
+            http::Method::HEAD,
+            url,
+            headers.clone(),
+            None,
+        )
+        .await?;
 
         Ok(res.headers().clone())
     }
 
-    fn post(
+    async fn post(
         &self,
         headers: &HeaderMap,
         path: &str,
         body: &str,
-    ) -> result::Result<Response, Self::Err> {
+    ) -> Result<Response<Vec<u8>>, Self::Err> {
         let url = join_uri(&self.base, path)?;
 
-        let res = self
-            .tokio_runtime
-            .lock()
-            .unwrap()
-            .block_on(request_with_redirect(
-                self.client.clone(),
-                http::Method::POST,
-                url,
-                headers.clone(),
-                Some(body.to_string()),
-            ))?;
-
-        Ok(Response::new(res))
+        let res = request_with_redirect(
+            self.client.clone(),
+            http::Method::POST,
+            url,
+            headers.clone(),
+            Some(body.to_string()),
+        )
+        .await?;
+        let res = fetch_body(res).await?;
+        Ok(res)
     }
 
-    fn delete(&self, headers: &HeaderMap, path: &str) -> result::Result<Response, Self::Err> {
+    async fn post_stream(
+        &self,
+        headers: &HeaderMap,
+        path: &str,
+        body: &str,
+    ) -> Result<Response<hyper::Body>, Self::Err> {
         let url = join_uri(&self.base, path)?;
 
-        let res = self
-            .tokio_runtime
-            .lock()
-            .unwrap()
-            .block_on(request_with_redirect::<Vec<u8>>(
-                self.client.clone(),
-                http::Method::DELETE,
-                url,
-                headers.clone(),
-                None,
-            ))?;
-
-        Ok(Response::new(res))
+        let res = request_with_redirect(
+            self.client.clone(),
+            http::Method::POST,
+            url,
+            headers.clone(),
+            Some(body.to_string()),
+        )
+        .await?;
+        Ok(res)
     }
 
-    fn post_file(
+    async fn delete(
+        &self,
+        headers: &HeaderMap,
+        path: &str,
+    ) -> Result<Response<Vec<u8>>, Self::Err> {
+        let url = join_uri(&self.base, path)?;
+
+        let res = request_with_redirect::<Vec<u8>>(
+            self.client.clone(),
+            http::Method::DELETE,
+            url,
+            headers.clone(),
+            None,
+        )
+        .await?;
+        let res = fetch_body(res).await?;
+        Ok(res)
+    }
+
+    async fn post_file(
         &self,
         headers: &HeaderMap,
         path: &str,
         file: &Path,
-    ) -> result::Result<Response, Self::Err> {
+    ) -> Result<Response<Vec<u8>>, Self::Err> {
         let mut content = File::open(file)?;
         let url = join_uri(&self.base, path)?;
 
         let mut buf = Vec::new();
         content.read_to_end(&mut buf)?;
 
-        let res = self
-            .tokio_runtime
-            .lock()
-            .unwrap()
-            .block_on(request_with_redirect(
-                self.client.clone(),
-                http::Method::POST,
-                url,
-                headers.clone(),
-                Some(buf),
-            ))?;
-
-        Ok(Response::new(res))
+        let res = request_with_redirect(
+            self.client.clone(),
+            http::Method::POST,
+            url,
+            headers.clone(),
+            Some(buf),
+        )
+        .await?;
+        let res = fetch_body(res).await?;
+        Ok(res)
     }
 
-    fn put_file(
+    async fn put_file(
         &self,
         headers: &HeaderMap,
         path: &str,
         file: &Path,
-    ) -> result::Result<Response, Self::Err> {
+    ) -> Result<Response<Vec<u8>>, Self::Err> {
         let mut content = File::open(file)?;
         let url = join_uri(&self.base, path)?;
 
         let mut buf = Vec::new();
         content.read_to_end(&mut buf)?;
 
-        let res = self
-            .tokio_runtime
-            .lock()
-            .unwrap()
-            .block_on(request_with_redirect(
-                self.client.clone(),
-                http::Method::PUT,
-                url,
-                headers.clone(),
-                Some(buf),
-            ))?;
-
-        Ok(Response::new(res))
+        let res = request_with_redirect(
+            self.client.clone(),
+            http::Method::PUT,
+            url,
+            headers.clone(),
+            Some(buf),
+        )
+        .await?;
+        let res = fetch_body(res).await?;
+        Ok(res)
     }
 }

@@ -1,10 +1,29 @@
-use crate::docker;
 use crate::response;
 use std::env;
 use std::io;
 use thiserror::Error;
 
-pub type Result<T> = ::std::result::Result<T, Error>;
+/// Type of general docker error response
+#[derive(Debug, serde::Deserialize)]
+pub struct DockerError {
+    pub message: String,
+}
+
+impl std::fmt::Display for DockerError {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(fmt, "{}", self.message)
+    }
+}
+
+impl std::error::Error for DockerError {
+    fn description(&self) -> &str {
+        &self.message
+    }
+
+    fn cause(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        None
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -17,7 +36,7 @@ pub enum Error {
     #[error("json error")]
     Json(#[from] serde_json::Error),
     #[error("docker error")]
-    Docker(#[from] docker::DockerError),
+    Docker(#[from] DockerError),
     #[error("response error")]
     Response(#[from] response::Error),
     #[error("http error")]
