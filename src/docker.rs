@@ -2195,7 +2195,7 @@ mod tests {
 
     /// This is executed after `docker-compose build iostream`
     #[tokio::test]
-    #[ignore]
+    //#[ignore]
     async fn attach_container() {
         use crate::signal::*;
         let docker = Docker::connect_with_defaults().unwrap();
@@ -2214,24 +2214,33 @@ mod tests {
             .host_config(host_config)
             .env("WAIT_BEFORE_CONTINUING=YES".to_string());
 
+        println!("a");
         let container = docker
             .create_container(Some("attach_container_test"), &create)
             .await
             .unwrap();
+        println!("b");
         docker.start_container(&container.id).await.unwrap();
+        println!("c");
         let res = docker
             .attach_container(&container.id, None, true, true, false, true, true)
             .await
             .unwrap();
 
-        let (_stdin_buf, stdout_buf, stderr_buf) = read_frame_all(res).await.unwrap();
+        let kill = async {
+            // We've successfully attached, tell the container
+            // to continue printing to stdout and stderr
+            docker
+                .kill_container(&container.id, Signal::from(SIGUSR1))
+                .await
+                .unwrap();
+        };
+        println!("d");
+        let (ret, _) = futures::future::join(read_frame_all(res), kill).await;
+        let (_stdin_buf, stdout_buf, stderr_buf) = ret.unwrap();
+        println!("e");
 
-        // We've successfully attached, tell the container
-        // to continue printing to stdout and stderr
-        docker
-            .kill_container(&container.id, Signal::from(SIGUSR1))
-            .await
-            .unwrap();
+        println!("f");
 
         // expected files
         let exp_stdout_buf = read_file(root.join(exps[0])).await;
@@ -2239,8 +2248,10 @@ mod tests {
 
         assert_eq!(exp_stdout_buf, stdout_buf);
         assert_eq!(exp_stderr_buf, stderr_buf);
+        println!("g");
 
         docker.wait_container(&container.id).await.unwrap();
+        println!("h");
         docker
             .remove_container(&container.id, None, None, None)
             .await
@@ -2249,7 +2260,7 @@ mod tests {
 
     /// This is executed after `docker-compose build iostream`
     #[tokio::test]
-    #[ignore]
+    //#[ignore]
     async fn exec_container() {
         let docker = Docker::connect_with_defaults().unwrap();
 
@@ -2310,7 +2321,7 @@ mod tests {
 
     /// This is executed after `docker-compose build signal`
     #[tokio::test]
-    #[ignore]
+    //#[ignore]
     async fn signal_container() {
         use crate::signal::*;
         let docker = Docker::connect_with_defaults().unwrap();
@@ -2329,25 +2340,26 @@ mod tests {
             .attach_container(&container.id, None, true, true, false, true, true)
             .await
             .unwrap();
+        let kill = async {
+            let signals = [SIGHUP, SIGINT, SIGUSR1, SIGUSR2, SIGTERM];
+            let signalstrs = vec![
+                "HUP".to_string(),
+                "INT".to_string(),
+                "USR1".to_string(),
+                "USR2".to_string(),
+                "TERM".to_string(),
+            ];
 
-        let (_stdin_buf, stdout_buf, _stderr_buf) = read_frame_all(res).await.unwrap();
-
-        let signals = [SIGHUP, SIGINT, SIGUSR1, SIGUSR2, SIGTERM];
-        let signalstrs = vec![
-            "HUP".to_string(),
-            "INT".to_string(),
-            "USR1".to_string(),
-            "USR2".to_string(),
-            "TERM".to_string(),
-        ];
-
-        for sig in signals {
-            trace!("cause signal: {:?}", sig);
-            docker
-                .kill_container(&container.id, Signal::from(sig))
-                .await
-                .unwrap();
-        }
+            for sig in signals {
+                trace!("cause signal: {:?}", sig);
+                docker
+                    .kill_container(&container.id, Signal::from(sig))
+                    .await
+                    .unwrap();
+            }
+        };
+        let (ret, _) = futures::fuutre::join(read_frame_all(res), kill).await;
+        let (_stdin_buf, stdout_buf, _stderr_buf) = ret.unwrap();
 
         let stdout = std::io::Cursor::new(stdout_buf);
         let stdout_buffer = std::io::BufReader::new(stdout);
