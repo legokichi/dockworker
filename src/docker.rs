@@ -31,7 +31,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-async fn from_response_stream(
+async fn into_aframe_stream(
     res: http::Response<hyper::Body>,
 ) -> Result<BoxStream<'static, Result<AttachResponseFrame, DwError>>, DwError> {
     use futures::stream::StreamExt;
@@ -48,9 +48,9 @@ async fn from_response_stream(
                 if err.kind() == std::io::ErrorKind::UnexpectedEof {
                     break; // end of stream
                 }
-                    log::error!("unexpected io error{:?}", err);
-                    yield Err(DwError::from(err));
-                    break;
+                log::error!("unexpected io error{:?}", err);
+                yield Err(DwError::from(err));
+                break;
             }
             // read body
             let mut frame_size_raw = &buf[4..];
@@ -60,9 +60,9 @@ async fn from_response_stream(
                 if err.kind() == std::io::ErrorKind::UnexpectedEof {
                     break; // end of stream
                 }
-                    log::error!("unexpected io error{:?}", err);
-                    yield Err(DwError::from(err));
-                    break;
+                log::error!("unexpected io error{:?}", err);
+                yield Err(DwError::from(err));
+                break;
             }
             match buf[0] {
                 0 => {
@@ -515,7 +515,7 @@ impl Docker {
             )
             .await?;
         if res.status().is_success() {
-            from_response_stream(res).await
+            into_aframe_stream(res).await
         } else {
             Err(into_docker_error(res).await?.into())
         }
@@ -669,7 +669,7 @@ impl Docker {
             .post_stream(&headers, &format!("/exec/{id}/start"), &json_body)
             .await?;
         if res.status().is_success() {
-            from_response_stream(res).await
+            into_aframe_stream(res).await
         } else {
             Err(into_docker_error(res).await?.into())
         }
@@ -1162,31 +1162,29 @@ impl Docker {
         if !res.status().is_success() {
             return Err(serde_json::from_slice::<DockerError>(res.body())?.into());
         }
-
-        // read and discard to end of response
-        //for line in BufReader::new(res).lines() {
-        //    let buf = line?;
-        //    debug!("{}", buf);
-        //}
-        //TOD
-        let file = tokio::fs::File::open(path).await?.into_std().await;
-        let mut ar = tar::Archive::new(file);
-        for entry in ar.entries()?.filter_map(|e| e.ok()) {
-            let path = entry.path()?;
-            // looking for file name like XXXXXXXXXXXXXX.json
-            if path.extension() == Some(std::ffi::OsStr::new("json"))
-                && path != Path::new("manifest.json")
-            {
-                let stem = path.file_stem().unwrap(); // contains .json
-                let id = stem.to_str().ok_or(DwError::Unknown {
-                    message: format!("convert to String: {stem:?}"),
-                })?;
-                return Ok(ImageId::new(id.to_string()));
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let file = std::fs::File::open(path)?;
+            let mut ar = tar::Archive::new(file);
+            for entry in ar.entries()?.filter_map(|e| e.ok()) {
+                let path = entry.path()?;
+                // looking for file name like XXXXXXXXXXXXXX.json
+                if path.extension() == Some(std::ffi::OsStr::new("json"))
+                    && path != Path::new("manifest.json")
+                {
+                    let stem = path.file_stem().unwrap(); // contains .json
+                    let id = stem.to_str().ok_or(DwError::Unknown {
+                        message: format!("convert to String: {stem:?}"),
+                    })?;
+                    return Ok(ImageId::new(id.to_string()));
+                }
             }
-        }
-        Err(DwError::Unknown {
-            message: "no expected file: XXXXXX.json".to_owned(),
+            Err(DwError::Unknown {
+                message: "no expected file: XXXXXX.json".to_owned(),
+            })
         })
+        .await
+        .expect("join error")
     }
 
     /// Check auth configuration
