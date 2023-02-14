@@ -1,4 +1,6 @@
-use dockworker::{container::ContainerStdio, ContainerCreateOptions, ContainerHostConfig, Docker};
+use dockworker::{
+    container::ContainerStdioType, ContainerCreateOptions, ContainerHostConfig, Docker,
+};
 
 #[tokio::main]
 async fn main() {
@@ -19,16 +21,16 @@ async fn main() {
         .unwrap();
 
     use futures::stream::StreamExt;
-    while let Some(stdio) = res.next().await {
-        match stdio {
-            ContainerStdio::Stdin(buf) => {
-                println!("{}", String::from_utf8(buf).unwrap());
+    while let Some(stdio) = res.next().await.transpose().unwrap() {
+        match stdio.type_ {
+            ContainerStdioType::Stdin => {
+                println!("{}", String::from_utf8(stdio.frame).unwrap());
             }
-            ContainerStdio::Stdout(buf) => {
-                println!("{}", String::from_utf8(buf).unwrap());
+            ContainerStdioType::Stdout => {
+                println!("{}", String::from_utf8(stdio.frame).unwrap());
             }
-            ContainerStdio::Stderr(buf) => {
-                println!("{}", String::from_utf8(buf).unwrap());
+            ContainerStdioType::Stderr => {
+                println!("{}", String::from_utf8(stdio.frame).unwrap());
             }
         }
     }

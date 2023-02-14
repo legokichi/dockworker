@@ -4,25 +4,10 @@ use std::io;
 use thiserror::Error;
 
 /// Type of general docker error response
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, Error)]
+#[error("{message}")]
 pub struct DockerError {
     pub message: String,
-}
-
-impl std::fmt::Display for DockerError {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(fmt, "{}", self.message)
-    }
-}
-
-impl std::error::Error for DockerError {
-    fn description(&self) -> &str {
-        &self.message
-    }
-
-    fn cause(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
-    }
 }
 
 #[derive(Error, Debug)]

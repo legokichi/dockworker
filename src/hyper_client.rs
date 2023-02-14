@@ -2,8 +2,6 @@ use crate::errors::Error as DwError;
 use crate::http_client::HttpClient;
 use http::{HeaderMap, Request, Response};
 use hyper::Uri;
-use std::fs::File;
-use std::io::Read;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -309,11 +307,12 @@ impl HttpClient for HyperClient {
         path: &str,
         file: &Path,
     ) -> Result<Response<Vec<u8>>, Self::Err> {
-        let mut content = File::open(file)?;
+        let mut content = tokio::fs::File::open(file).await?;
         let url = join_uri(&self.base, path)?;
 
+        use tokio::io::AsyncReadExt;
         let mut buf = Vec::new();
-        content.read_to_end(&mut buf)?;
+        content.read_to_end(&mut buf).await?;
 
         let res = request_with_redirect(
             self.client.clone(),
@@ -333,11 +332,12 @@ impl HttpClient for HyperClient {
         path: &str,
         file: &Path,
     ) -> Result<Response<Vec<u8>>, Self::Err> {
-        let mut content = File::open(file)?;
+        let mut content = tokio::fs::File::open(file).await?;
         let url = join_uri(&self.base, path)?;
 
+        use tokio::io::AsyncReadExt;
         let mut buf = Vec::new();
-        content.read_to_end(&mut buf)?;
+        content.read_to_end(&mut buf).await?;
 
         let res = request_with_redirect(
             self.client.clone(),

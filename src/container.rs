@@ -326,10 +326,16 @@ impl ContainerFilters {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ContainerStdio {
-    Stdin(Vec<u8>),
-    Stdout(Vec<u8>),
-    Stderr(Vec<u8>),
+pub enum ContainerStdioType {
+    Stdin,
+    Stdout,
+    Stderr,
+}
+/// response fragment of the attach container api
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub struct AttachResponseFrame {
+    pub type_: ContainerStdioType,
+    pub frame: Vec<u8>,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

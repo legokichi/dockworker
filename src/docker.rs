@@ -1,6 +1,7 @@
 #![allow(clippy::bool_assert_comparison)]
 use crate::container::{
-    Container, ContainerFilters, ContainerInfo, ContainerStdio, ExecInfo, ExitStatus,
+    AttachResponseFrame, Container, ContainerFilters, ContainerInfo, ContainerStdioType, ExecInfo,
+    ExitStatus,
 };
 pub use crate::credentials::{Credential, UserPassword};
 use crate::errors::{DockerError, Error as DwError};
@@ -32,7 +33,7 @@ use std::time::Duration;
 
 async fn from_response_stream(
     res: http::Response<hyper::Body>,
-) -> Result<BoxStream<'static, ContainerStdio>, DwError> {
+) -> Result<BoxStream<'static, Result<AttachResponseFrame, DwError>>, DwError> {
     use futures::stream::StreamExt;
     use futures::stream::TryStreamExt;
     let mut aread = tokio_util::io::StreamReader::new(
@@ -46,9 +47,10 @@ async fn from_response_stream(
             if let Err(err) = aread.read_exact(&mut buf).await {
                 if err.kind() == std::io::ErrorKind::UnexpectedEof {
                     break; // end of stream
-                } else {
-                    panic!("unexpected io error{:?}", err);
                 }
+                    log::error!("unexpected io error{:?}", err);
+                    yield Err(DwError::from(err));
+                    break;
             }
             // read body
             let mut frame_size_raw = &buf[4..];
@@ -57,23 +59,25 @@ async fn from_response_stream(
             if let Err(err) = aread.read_exact(&mut frame).await {
                 if err.kind() == std::io::ErrorKind::UnexpectedEof {
                     break; // end of stream
-                } else {
-                    panic!("unexpected io error{:?}", err);
                 }
+                    log::error!("unexpected io error{:?}", err);
+                    yield Err(DwError::from(err));
+                    break;
             }
             match buf[0] {
                 0 => {
-                    yield ContainerStdio::Stdin(frame);
+                    yield Ok(AttachResponseFrame{ type_: ContainerStdioType::Stdin, frame });
                 },
                 1 => {
-                    yield ContainerStdio::Stdout(frame);
+                    yield Ok(AttachResponseFrame{ type_: ContainerStdioType::Stdout, frame });
                 },
                 2 => {
-                    yield ContainerStdio::Stderr(frame);
+                    yield Ok(AttachResponseFrame{ type_: ContainerStdioType::Stderr, frame });
                 },
                 n => {
                     log::error!("unexpected kind of chunk: {}", n);
-                    panic!("unexpected kind of chunk: {}", n);
+                    yield Err(DwError::Unknown{ message: format!("unexpected kind of chunk: {}",n) });
+                    break;
                 }
             }
         }
@@ -492,7 +496,7 @@ impl Docker {
         stdin: bool,
         stdout: bool,
         stderr: bool,
-    ) -> Result<BoxStream<'static, ContainerStdio>, DwError> {
+    ) -> Result<BoxStream<'static, Result<AttachResponseFrame, DwError>>, DwError> {
         let mut param = url::form_urlencoded::Serializer::new(String::new());
         if let Some(keys) = detachKeys {
             param.append_pair("detachKeys", keys);
@@ -651,7 +655,7 @@ impl Docker {
         &self,
         id: &str,
         option: &StartExecOptions,
-    ) -> Result<BoxStream<'static, ContainerStdio>, DwError> {
+    ) -> Result<BoxStream<'static, Result<AttachResponseFrame, DwError>>, DwError> {
         let json_body = serde_json::to_string(&option)?;
 
         let mut headers = self.headers().clone();
@@ -1503,12 +1507,41 @@ mod tests {
     use std::iter::{self, Iterator};
     use std::path::PathBuf;
     use std::thread;
-    use tokio::io::AsyncReadExt;
 
     use chrono::Local;
     use log::trace;
     use rand::Rng;
     use tar::Builder as TarBuilder;
+
+    async fn read_frame_all(
+        mut src: BoxStream<'static, Result<AttachResponseFrame, DwError>>,
+    ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), DwError> {
+        let mut stdout_buf = vec![];
+        let mut stdin_buf = vec![];
+        let mut stderr_buf = vec![];
+        use futures::stream::StreamExt;
+        while let Some(mut stdio) = src.next().await.transpose()? {
+            match stdio.type_ {
+                ContainerStdioType::Stdin => {
+                    stdin_buf.append(&mut stdio.frame);
+                }
+                ContainerStdioType::Stdout => {
+                    stdout_buf.append(&mut stdio.frame);
+                }
+                ContainerStdioType::Stderr => {
+                    stderr_buf.append(&mut stdio.frame);
+                }
+            }
+        }
+        Ok((stdin_buf, stdout_buf, stderr_buf))
+    }
+    async fn read_file(path: PathBuf) -> Vec<u8> {
+        let mut file = tokio::fs::File::open(path).await.unwrap();
+        let mut buf = vec![];
+        use tokio::io::AsyncReadExt;
+        file.read_to_end(&mut buf).await.unwrap();
+        buf
+    }
 
     #[tokio::test]
     async fn test_ping() {
@@ -1658,6 +1691,7 @@ mod tests {
         let src = src.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err));
         let mut aread = tokio_util::io::StreamReader::new(src);
         let mut buf = vec![];
+        use tokio::io::AsyncReadExt;
         aread.read_to_end(&mut buf).await.unwrap();
         let cur = std::io::Cursor::new(buf);
         tar::Archive::new(cur).unpack(temp_dir.join("put")).unwrap();
@@ -1972,6 +2006,7 @@ mod tests {
             let src = res.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err));
             let mut aread = tokio_util::io::StreamReader::new(src);
             let mut buf = vec![];
+            use tokio::io::AsyncReadExt;
             aread.read_to_end(&mut buf).await.unwrap();
             let mut res = std::io::Cursor::new(buf);
             std::io::copy(&mut res, &mut file).unwrap();
@@ -2084,6 +2119,7 @@ mod tests {
         let mut fileb = tokio::fs::File::open(pathb).await.unwrap();
         let mut a = vec![];
         let mut b = vec![];
+        use tokio::io::AsyncReadExt;
         filea.read_to_end(&mut a).await.unwrap();
         fileb.read_to_end(&mut b).await.unwrap();
         a == b
@@ -2255,28 +2291,12 @@ mod tests {
             .await
             .unwrap();
         docker.start_container(&container.id).await.unwrap();
-        let mut res = docker
+        let res = docker
             .attach_container(&container.id, None, true, true, false, true, true)
             .await
             .unwrap();
 
-        let mut stdout_buf = vec![];
-        let mut stdin_buf = vec![];
-        let mut stderr_buf = vec![];
-        use futures::stream::StreamExt;
-        while let Some(stdio) = res.next().await {
-            match stdio {
-                ContainerStdio::Stdin(mut buf) => {
-                    stdin_buf.append(&mut buf);
-                }
-                ContainerStdio::Stdout(mut buf) => {
-                    stdout_buf.append(&mut buf);
-                }
-                ContainerStdio::Stderr(mut buf) => {
-                    stderr_buf.append(&mut buf);
-                }
-            }
-        }
+        let (_stdin_buf, stdout_buf, stderr_buf) = read_frame_all(res).await.unwrap();
 
         // We've successfully attached, tell the container
         // to continue printing to stdout and stderr
@@ -2286,12 +2306,8 @@ mod tests {
             .unwrap();
 
         // expected files
-        let mut exp_stdout = tokio::fs::File::open(root.join(exps[0])).await.unwrap();
-        let mut exp_stderr = tokio::fs::File::open(root.join(exps[1])).await.unwrap();
-        let mut exp_stdout_buf = vec![];
-        let mut exp_stderr_buf = vec![];
-        exp_stdout.read_to_end(&mut exp_stdout_buf).await.unwrap();
-        exp_stderr.read_to_end(&mut exp_stderr_buf).await.unwrap();
+        let exp_stdout_buf = read_file(root.join(exps[0])).await;
+        let exp_stderr_buf = read_file(root.join(exps[1])).await;
 
         assert_eq!(exp_stdout_buf, stdout_buf);
         assert_eq!(exp_stderr_buf, stderr_buf);
@@ -2338,36 +2354,16 @@ mod tests {
             .await
             .unwrap();
         let exec_start_config = StartExecOptions::new();
-        let mut res = docker
+        let res = docker
             .start_exec(&exec_instance.id, &exec_start_config)
             .await
             .unwrap();
 
-        let mut stdout_buf = vec![];
-        let mut stdin_buf = vec![];
-        let mut stderr_buf = vec![];
-        use futures::stream::StreamExt;
-        while let Some(stdio) = res.next().await {
-            match stdio {
-                ContainerStdio::Stdin(mut buf) => {
-                    stdin_buf.append(&mut buf);
-                }
-                ContainerStdio::Stdout(mut buf) => {
-                    stdout_buf.append(&mut buf);
-                }
-                ContainerStdio::Stderr(mut buf) => {
-                    stderr_buf.append(&mut buf);
-                }
-            }
-        }
+        let (_stdin_buf, stdout_buf, stderr_buf) = read_frame_all(res).await.unwrap();
 
         // expected files
-        let mut exp_stdout = tokio::fs::File::open(root.join(exps[0])).await.unwrap();
-        let mut exp_stderr = tokio::fs::File::open(root.join(exps[1])).await.unwrap();
-        let mut exp_stdout_buf = vec![];
-        let mut exp_stderr_buf = vec![];
-        exp_stdout.read_to_end(&mut exp_stdout_buf).await.unwrap();
-        exp_stderr.read_to_end(&mut exp_stderr_buf).await.unwrap();
+        let exp_stdout_buf = read_file(root.join(exps[0])).await;
+        let exp_stderr_buf = read_file(root.join(exps[1])).await;
 
         assert_eq!(exp_stdout_buf, stdout_buf);
         assert_eq!(exp_stderr_buf, stderr_buf);
@@ -2401,28 +2397,12 @@ mod tests {
             .await
             .unwrap();
         docker.start_container(&container.id).await.unwrap();
-        let mut res = docker
+        let res = docker
             .attach_container(&container.id, None, true, true, false, true, true)
             .await
             .unwrap();
 
-        let mut stdout = vec![];
-        let mut stdin = vec![];
-        let mut stderr = vec![];
-        use futures::stream::StreamExt;
-        while let Some(stdio) = res.next().await {
-            match stdio {
-                ContainerStdio::Stdin(mut buf) => {
-                    stdin.append(&mut buf);
-                }
-                ContainerStdio::Stdout(mut buf) => {
-                    stdout.append(&mut buf);
-                }
-                ContainerStdio::Stderr(mut buf) => {
-                    stderr.append(&mut buf);
-                }
-            }
-        }
+        let (_stdin_buf, stdout_buf, _stderr_buf) = read_frame_all(res).await.unwrap();
 
         let signals = [SIGHUP, SIGINT, SIGUSR1, SIGUSR2, SIGTERM];
         let signalstrs = vec![
@@ -2433,22 +2413,19 @@ mod tests {
             "TERM".to_string(),
         ];
 
-        let futs = signals
-            .iter()
-            .map(|sig| {
-                trace!("cause signal: {:?}", sig);
-                docker.kill_container(&container.id, Signal::from(*sig))
-            })
-            .collect::<Vec<_>>();
-        futures::future::join_all(futs).await;
+        for sig in signals {
+            trace!("cause signal: {:?}", sig);
+            docker
+                .kill_container(&container.id, Signal::from(sig))
+                .await
+                .unwrap();
+        }
 
-        let stdout = std::io::Cursor::new(stdout);
+        let stdout = std::io::Cursor::new(stdout_buf);
         let stdout_buffer = std::io::BufReader::new(stdout);
         use std::io::BufRead;
-        assert!(stdout_buffer
-            .lines()
-            .map(|line| line.unwrap())
-            .eq(signalstrs));
+        let lines = stdout_buffer.lines().map(|line| line.unwrap());
+        assert!(lines.eq(signalstrs));
 
         trace!("wait");
         assert_eq!(
