@@ -2228,6 +2228,8 @@ mod tests {
             .unwrap();
 
         let kill = async {
+            // wait a moment
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             // We've successfully attached, tell the container
             // to continue printing to stdout and stderr
             docker
@@ -2340,16 +2342,17 @@ mod tests {
             .attach_container(&container.id, None, true, true, false, true, true)
             .await
             .unwrap();
+        let signals = [SIGHUP, SIGINT, SIGUSR1, SIGUSR2, SIGTERM];
+        let signalstrs = vec![
+            "HUP".to_string(),
+            "INT".to_string(),
+            "USR1".to_string(),
+            "USR2".to_string(),
+            "TERM".to_string(),
+        ];
         let kill = async {
-            let signals = [SIGHUP, SIGINT, SIGUSR1, SIGUSR2, SIGTERM];
-            let signalstrs = vec![
-                "HUP".to_string(),
-                "INT".to_string(),
-                "USR1".to_string(),
-                "USR2".to_string(),
-                "TERM".to_string(),
-            ];
-
+            // wait a moment
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             for sig in signals {
                 trace!("cause signal: {:?}", sig);
                 docker
@@ -2358,7 +2361,7 @@ mod tests {
                     .unwrap();
             }
         };
-        let (ret, _) = futures::fuutre::join(read_frame_all(res), kill).await;
+        let (ret, _) = futures::future::join(read_frame_all(res), kill).await;
         let (_stdin_buf, stdout_buf, _stderr_buf) = ret.unwrap();
 
         let stdout = std::io::Cursor::new(stdout_buf);
