@@ -19,7 +19,6 @@ use crate::stats::Stats;
 use crate::system::{AuthToken, SystemInfo};
 use crate::version::Version;
 use base64::{engine::general_purpose, Engine as _};
-use byteorder::BigEndian;
 use bytes::Bytes;
 #[cfg(feature = "experimental")]
 use checkpoint::{Checkpoint, CheckpointCreateOptions, CheckpointDeleteOptions};
@@ -32,13 +31,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 async fn into_aframe_stream(
-    res: http::Response<hyper::Body>,
+    body: hyper::Body,
 ) -> Result<BoxStream<'static, Result<AttachResponseFrame, DwError>>, DwError> {
     use futures::stream::StreamExt;
     use futures::stream::TryStreamExt;
     let mut aread = tokio_util::io::StreamReader::new(
-        res.into_body()
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err)),
+        body.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err)),
     );
     let mut buf = [0u8; 8];
     let src = async_stream::stream! {
@@ -54,7 +52,8 @@ async fn into_aframe_stream(
             }
             // read body
             let mut frame_size_raw = &buf[4..];
-            let frame_size = byteorder::ReadBytesExt::read_u32::<BigEndian>(&mut frame_size_raw).unwrap();
+            let frame_size = byteorder::ReadBytesExt::read_u32::<byteorder::BigEndian>(&mut frame_size_raw)
+                .map_err(|e| DwError::Unknown{ message: format!("unexpeced buffer: {e:?}") })?;
             let mut frame = vec![0; frame_size as usize];
             if let Err(err) = aread.read_exact(&mut frame).await {
                 if err.kind() == std::io::ErrorKind::UnexpectedEof {
@@ -85,21 +84,18 @@ async fn into_aframe_stream(
     Ok(src.boxed())
 }
 
-async fn into_docker_error(res: http::Response<hyper::Body>) -> Result<DockerError, DwError> {
-    let body = hyper::body::to_bytes(res.into_body()).await?;
+async fn into_docker_error(body: hyper::Body) -> Result<DockerError, DwError> {
+    let body = hyper::body::to_bytes(body).await?;
     let err = serde_json::from_slice::<DockerError>(body.as_ref())?;
     Ok(err)
 }
 
-fn into_lines(
-    res: http::Response<hyper::Body>,
-) -> Result<BoxStream<'static, Result<String, DwError>>, DwError> {
+fn into_lines(body: hyper::Body) -> Result<BoxStream<'static, Result<String, DwError>>, DwError> {
     use futures::stream::StreamExt;
     use futures::stream::TryStreamExt;
     use tokio::io::AsyncBufReadExt;
     let aread = tokio_util::io::StreamReader::new(
-        res.into_body()
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err)),
+        body.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err)),
     );
     let stream = tokio_stream::wrappers::LinesStream::new(aread.lines());
     let stream = stream.map_err(Into::into).boxed();
@@ -107,13 +103,13 @@ fn into_lines(
 }
 
 pub fn into_jsonlines<T>(
-    res: http::Response<hyper::Body>,
+    body: hyper::Body,
 ) -> Result<BoxStream<'static, Result<T, DwError>>, DwError>
 where
     T: DeserializeOwned,
 {
     use futures::StreamExt;
-    let o = into_lines(res)?;
+    let o = into_lines(body)?;
     let stream = o
         .map(|o| match o {
             Ok(o) => serde_json::from_str(&o).map_err(Into::into),
@@ -515,9 +511,9 @@ impl Docker {
             )
             .await?;
         if res.status().is_success() {
-            into_aframe_stream(res).await
+            into_aframe_stream(res.into_body()).await
         } else {
-            Err(into_docker_error(res).await?.into())
+            Err(into_docker_error(res.into_body()).await?.into())
         }
     }
 
@@ -669,9 +665,9 @@ impl Docker {
             .post_stream(&headers, &format!("/exec/{id}/start"), &json_body)
             .await?;
         if res.status().is_success() {
-            into_aframe_stream(res).await
+            into_aframe_stream(res.into_body()).await
         } else {
-            Err(into_docker_error(res).await?.into())
+            Err(into_docker_error(res.into_body()).await?.into())
         }
     }
 
@@ -707,9 +703,9 @@ impl Docker {
             )
             .await?;
         if res.status().is_success() {
-            into_lines(res)
+            into_lines(res.into_body())
         } else {
-            Err(into_docker_error(res).await?.into())
+            Err(into_docker_error(res.into_body()).await?.into())
         }
     }
 
@@ -778,9 +774,9 @@ impl Docker {
             )
             .await?;
         if res.status().is_success() {
-            into_jsonlines(res)
+            into_jsonlines(res.into_body())
         } else {
-            Err(into_docker_error(res).await?.into())
+            Err(into_docker_error(res.into_body()).await?.into())
         }
     }
 
@@ -845,7 +841,7 @@ impl Docker {
             use futures::stream::TryStreamExt;
             Ok(res.into_body().map_err(DwError::from).boxed())
         } else {
-            Err(into_docker_error(res).await?.into())
+            Err(into_docker_error(res.into_body()).await?.into())
         }
     }
 
@@ -989,9 +985,9 @@ impl Docker {
             .post_stream(&headers, &format!("/images/create?{}", param.finish()), "")
             .await?;
         if res.status().is_success() {
-            into_jsonlines(res)
+            into_jsonlines(res.into_body())
         } else {
-            Err(into_docker_error(res).await?.into())
+            Err(into_docker_error(res.into_body()).await?.into())
         }
     }
 
@@ -1138,7 +1134,7 @@ impl Docker {
             use futures::stream::TryStreamExt;
             Ok(res.into_body().map_err(Into::into).boxed())
         } else {
-            Err(into_docker_error(res).await?.into())
+            Err(into_docker_error(res.into_body()).await?.into())
         }
     }
 
@@ -1285,7 +1281,7 @@ impl Docker {
             use futures::stream::TryStreamExt;
             Ok(res.into_body().map_err(Into::into).boxed())
         } else {
-            Err(into_docker_error(res).await?.into())
+            Err(into_docker_error(res.into_body()).await?.into())
         }
     }
 
@@ -1344,7 +1340,7 @@ impl Docker {
             .http_client()
             .get_stream(self.headers(), &format!("/events?{}", param))
             .await?;
-        into_jsonlines(res)
+        into_jsonlines(res.into_body())
     }
 
     /// List networks
@@ -1509,7 +1505,6 @@ mod tests {
     use chrono::Local;
     use log::trace;
     use rand::Rng;
-    use tar::Builder as TarBuilder;
 
     async fn read_frame_all(
         mut src: BoxStream<'static, Result<AttachResponseFrame, DwError>>,
@@ -1657,7 +1652,7 @@ mod tests {
                 .unwrap()
                 .into_std()
                 .await;
-            let mut builder = TarBuilder::new(file);
+            let mut builder = tar::Builder::new(file);
             let mut file2 = tokio::fs::File::open(test_file)
                 .await
                 .unwrap()

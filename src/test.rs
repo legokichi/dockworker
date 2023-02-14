@@ -32,7 +32,7 @@ fn get_stats_suspended() {
 #[tokio::test]
 async fn get_stats_streaming() {
     let res = get_stats_response();
-    let src = crate::docker::into_jsonlines::<Stats>(res).unwrap();
+    let src = crate::docker::into_jsonlines::<Stats>(res.into_body()).unwrap();
     use futures::stream::StreamExt;
     let stats = src
         .collect::<Vec<_>>()
