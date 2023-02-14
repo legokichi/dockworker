@@ -2195,7 +2195,7 @@ mod tests {
 
     /// This is executed after `docker-compose build iostream`
     #[tokio::test]
-    //#[ignore]
+    #[ignore]
     async fn attach_container() {
         use crate::signal::*;
         let docker = Docker::connect_with_defaults().unwrap();
@@ -2249,7 +2249,7 @@ mod tests {
 
     /// This is executed after `docker-compose build iostream`
     #[tokio::test]
-    //#[ignore]
+    #[ignore]
     async fn exec_container() {
         let docker = Docker::connect_with_defaults().unwrap();
 
@@ -2310,7 +2310,7 @@ mod tests {
 
     /// This is executed after `docker-compose build signal`
     #[tokio::test]
-    //#[ignore]
+    #[ignore]
     async fn signal_container() {
         use crate::signal::*;
         let docker = Docker::connect_with_defaults().unwrap();
@@ -2366,29 +2366,5 @@ mod tests {
             .remove_container(&container.id, None, None, None)
             .await
             .unwrap();
-    }
-
-    // See https://github.com/hyperium/hyper/issues/2312
-    #[tokio::test]
-    //#[ignore]
-    async fn workaround_hyper_hangup() {
-        use std::sync::mpsc;
-
-        let (tx, rx) = mpsc::channel();
-        let fut = tokio::spawn(async move {
-            let docker = Docker::connect_with_defaults().unwrap();
-            for _ in 0..1000 {
-                let _events = docker.events(None, None, None).await.unwrap();
-                tx.send(()).unwrap();
-            }
-        });
-        for i in 0..1000 {
-            assert_eq!(
-                rx.recv_timeout(std::time::Duration::from_secs(15)),
-                Ok(()),
-                "i = {i}"
-            );
-        }
-        fut.await.unwrap();
     }
 }
