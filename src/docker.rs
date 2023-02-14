@@ -1500,7 +1500,6 @@ mod tests {
     use std::env;
     use std::iter::{self, Iterator};
     use std::path::PathBuf;
-    use std::thread;
 
     use chrono::Local;
     use log::trace;
@@ -1650,23 +1649,26 @@ mod tests {
 
     async fn put_file_container(docker: &Docker, container: &str) {
         let temp_dir = env::temp_dir();
-        let test_file = &temp_dir.join("test_file");
+        let test_file = temp_dir.join("test_file");
 
-        gen_rand_file(test_file, 1024).await.unwrap();
+        gen_rand_file(&test_file, 1024).await.unwrap();
         // prepare test file
-        tokio::task::spaen_blocking(move || {
-            let file = std::fs::File::create(test_file.with_extension("tar")).unwrap();
-            let mut builder = tar::Builder::new(file);
-            let mut file2 = std::fs::File::open(test_file).unwrap();
-            builder
-                .append_file(test_file.strip_prefix("/").unwrap(), &mut file2)
-                .unwrap();
+        tokio::task::spawn_blocking({
+            let test_file = test_file.clone();
+            move || {
+                let file = std::fs::File::create(test_file.with_extension("tar")).unwrap();
+                let mut builder = tar::Builder::new(file);
+                let mut file2 = std::fs::File::open(&test_file).unwrap();
+                builder
+                    .append_file(test_file.strip_prefix("/").unwrap(), &mut file2)
+                    .unwrap();
+            }
         })
         .await
-        .unwarp();
-        let err = docker.get_file(container, test_file).await.unwrap_err();
+        .unwrap();
+        let res = docker.get_file(container, &test_file).await;
         assert!(matches!(
-            err,
+            res.map(|_| ()).unwrap_err(),
             DwError::Docker(_) // not found
         ));
         docker
@@ -1678,17 +1680,18 @@ mod tests {
             )
             .await
             .unwrap();
-        let src = docker.get_file(container, test_file).await.unwrap();
+        let src = docker.get_file(container, &test_file).await.unwrap();
         let buf = read_bytes_stream_to_end(src).await;
-        let cur = std::io::Cursor::new(buf);
+        let temp_dir_put = temp_dir.join("put");
         tokio::task::spawn_blocking(move || {
-            tar::Archive::new(cur).unpack(temp_dir.join("put")).unwrap();
+            let cur = std::io::Cursor::new(buf);
+            tar::Archive::new(cur).unpack(&temp_dir_put).unwrap();
         })
         .await
         .unwrap();
         docker.wait_container(container).await.unwrap();
         let is_eq = equal_file(
-            test_file,
+            &test_file,
             &temp_dir.join("put").join(test_file.file_name().unwrap()),
         )
         .await;
@@ -1707,7 +1710,7 @@ mod tests {
 
         let log = docker.log_container(container, &log_options).await.unwrap();
         use futures::stream::StreamExt;
-        let log_all = log.collect::<Vec<String>>().await;
+        let log_all = log.collect::<Vec<Result<String, _>>>().await;
         let log_all = log_all.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
         let log_all = log_all.join("\n");
 
@@ -1828,7 +1831,7 @@ mod tests {
             let res = docker
                 .remove_container(&container.id, None, None, None)
                 .await;
-            assert!(err.is_err());
+            assert!(res.is_err());
         }
         println!("head file container");
         {
@@ -1971,9 +1974,8 @@ mod tests {
     }
 
     async fn test_image(docker: &Docker, name: &str, tag: &str) {
+        let mut src = docker.create_image(name, tag).await.unwrap();
         use futures::stream::StreamExt;
-        let src = docker.create_image(name, tag).await.unwrap();
-        use futres::stream::StreamExt;
         while let Some(st) = src.next().await.transpose().unwrap() {
             println!("{:?}", st);
         }
@@ -1984,7 +1986,7 @@ mod tests {
         {
             let res = docker.export_image(&image).await.unwrap();
             let buf = read_bytes_stream_to_end(res).await;
-            tokio::fs::File::write(&image_file, &buf).await.unwrap();
+            tokio::fs::write(&image_file, &buf).await.unwrap();
         }
 
         docker.remove_image(&image, None, None).await.unwrap();
@@ -2142,7 +2144,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            tokio::time::sleep(Duration::from_secs(1)); // drift timestamp in sec
+            tokio::time::sleep(Duration::from_secs(1)).await; // drift timestamp in sec
             if i == 3 {
                 create_nw_3 = Local::now();
             }
@@ -2175,17 +2177,14 @@ mod tests {
             let mut filter = Prune::default();
             filter.label(F::with(&[("test-network-4", Some("4"))]));
             let res = docker.prune_networks(filter).await.unwrap();
-            assert_eq!(
-            ,           &res.networks_deleted,
-                        &["nw_test_4".to_owned()]
-                    );
+            assert_eq!(&res.networks_deleted, &["nw_test_4".to_owned()]);
         }
         println!("filter network by negated label");
         {
             let mut filter = Prune::default();
             filter.label_not(F::with(&[("alias", Some("my-test-network-6"))]));
             let res = docker.prune_networks(filter).await.unwrap();
-            assert_eq!(&res.networks_deleted & ["nw_test_5".to_owned()]);
+            assert_eq!(&res.networks_deleted, &["nw_test_5".to_owned()]);
         }
         println!("prune network");
         {
