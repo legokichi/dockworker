@@ -5,6 +5,7 @@ use hyper::Uri;
 use std::path::Path;
 use std::str::FromStr;
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Debug)]
 enum Client {
     HttpClient(hyper::Client<hyper::client::HttpConnector>),
@@ -146,17 +147,9 @@ impl HyperClient {
         cert: &Path,
         ca: &Path,
     ) -> Result<Self, DwError> {
-        let mut key_buf = Vec::new();
-        let mut cert_buf = Vec::new();
-        let mut ca_buf = Vec::new();
-
-        let mut key_file = File::open(key)?;
-        let mut cert_file = File::open(cert)?;
-        let mut ca_file = File::open(ca)?;
-
-        key_file.read_to_end(&mut key_buf)?;
-        cert_file.read_to_end(&mut cert_buf)?;
-        ca_file.read_to_end(&mut ca_buf)?;
+        let key_buf = std::fs::read(key)?;
+        let cert_buf = std::fs::read(cert)?;
+        let ca_buf = std::fs::read(ca)?;
 
         let pkey =
             openssl::pkey::PKey::from_rsa(openssl::rsa::Rsa::private_key_from_pem(&key_buf)?)?;
@@ -169,7 +162,7 @@ impl HyperClient {
         builder.identity(id);
         builder.add_root_certificate(ca);
         // This ensures that using docker-machine-esque addresses work with Hyper.
-        let addr_https = addr.clone().replacen("tcp://", "https://", 1);
+        let addr_https = addr.to_string().replacen("tcp://", "https://", 1);
         let url = Uri::from_str(&addr_https).map_err(|err| DwError::InvalidUri {
             var: addr_https,
             source: err,
