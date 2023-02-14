@@ -2214,14 +2214,13 @@ mod tests {
             .host_config(host_config)
             .env("WAIT_BEFORE_CONTINUING=YES".to_string());
 
-        println!("a");
         let container = docker
             .create_container(Some("attach_container_test"), &create)
             .await
             .unwrap();
-        println!("b");
+
         docker.start_container(&container.id).await.unwrap();
-        println!("c");
+
         let res = docker
             .attach_container(&container.id, None, true, true, false, true, true)
             .await
@@ -2237,23 +2236,16 @@ mod tests {
                 .await
                 .unwrap();
         };
-        println!("d");
         let (ret, _) = futures::future::join(read_frame_all(res), kill).await;
         let (_stdin_buf, stdout_buf, stderr_buf) = ret.unwrap();
-        println!("e");
-
-        println!("f");
 
         // expected files
         let exp_stdout_buf = read_file(root.join(exps[0])).await;
         let exp_stderr_buf = read_file(root.join(exps[1])).await;
-
         assert_eq!(exp_stdout_buf, stdout_buf);
         assert_eq!(exp_stderr_buf, stderr_buf);
-        println!("g");
 
         docker.wait_container(&container.id).await.unwrap();
-        println!("h");
         docker
             .remove_container(&container.id, None, None, None)
             .await
