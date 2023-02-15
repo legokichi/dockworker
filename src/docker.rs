@@ -2195,7 +2195,7 @@ mod tests {
 
     /// This is executed after `docker-compose build iostream`
     #[tokio::test]
-    //#[ignore]
+    #[ignore]
     async fn attach_container() {
         use crate::signal::*;
         let docker = Docker::connect_with_defaults().unwrap();
@@ -2254,7 +2254,7 @@ mod tests {
 
     /// This is executed after `docker-compose build iostream`
     #[tokio::test]
-    //#[ignore]
+    #[ignore]
     async fn exec_container() {
         let docker = Docker::connect_with_defaults().unwrap();
 
@@ -2315,7 +2315,7 @@ mod tests {
 
     /// This is executed after `docker-compose build signal`
     #[tokio::test]
-    //#[ignore]
+    #[ignore]
     async fn signal_container() {
         use crate::signal::*;
         let docker = Docker::connect_with_defaults().unwrap();
